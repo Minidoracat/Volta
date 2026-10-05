@@ -1,0 +1,53 @@
+name: l10n check (fork only)
+
+on:
+  push:
+    branches: ['ci/**']
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app && xcodebuild -version
+
+      - name: Create simulator
+        run: |
+          RUNTIME=$(xcrun simctl list runtimes -j | python3 -c 'import json,sys; r=[x for x in json.load(sys.stdin)["runtimes"] if x["platform"]=="iOS" and x["isAvailable"]]; print(r[-1]["identifier"])')
+          DEVTYPE=$(xcrun simctl list devicetypes -j | python3 -c 'import json,sys; d=[x["identifier"] for x in json.load(sys.stdin)["devicetypes"] if x["name"].startswith("iPhone 17 Pro")]; print(d[0])')
+          echo "runtime=$RUNTIME devicetype=$DEVTYPE"
+          UDID=$(xcrun simctl create l10n "$DEVTYPE" "$RUNTIME")
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild -project Volta.xcodeproj -scheme Volta -configuration Debug \
+            -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO build 2>&1 | tee build.log \
+            | grep -E 'error:|warning: .*(Strings|LocalizationManager)\.swift|BUILD (SUCCEEDED|FAILED)'
+
+      - name: Screenshots
+        run: |
+          APP=$(find build/Build/Products/Debug-iphonesimulator -maxdepth 1 -name '*.app' | head -1)
+          echo "app=$APP"
+          xcrun simctl install "$UDID" "$APP"
+          mkdir -p shots
+          for lang in zh-Hant zh-Hans en; do
+            xcrun simctl launch --terminate-running-process "$UDID" com.ayo.music -appLanguage "$lang"
+            sleep 15
+            xcrun simctl io "$UDID" screenshot "shots/login-$lang.png"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: l10n-check
+          path: |
+            shots
+            build.log
